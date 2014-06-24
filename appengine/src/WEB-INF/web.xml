@@ -8,7 +8,7 @@
 
     <servlet>
         <servlet-name>fwm</servlet-name>
-        <servlet-class>net.exent.flywithme.ScheduleServlet</servlet-class>
+        <servlet-class>net.exent.flywithme.FlyWithMeServlet</servlet-class>
     </servlet>
 
     <servlet-mapping>

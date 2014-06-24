@@ -1,171 +1,27 @@
 package net.exent.flywithme;
 
-import com.google.appengine.api.datastore.*;
+import com.google.appengine.api.datastore.DatastoreService;
+import com.google.appengine.api.datastore.DatastoreServiceFactory;
+import com.google.appengine.api.datastore.Entity;
+import com.google.appengine.api.datastore.Text;
 
-import javax.servlet.http.HttpServlet;
-import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
-import java.beans.XMLDecoder;
 import java.beans.XMLEncoder;
-import java.io.*;
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
 import java.util.*;
-import java.util.logging.Level;
 import java.util.logging.Logger;
 
-public class ScheduleServlet extends HttpServlet {
-    private static final Logger log = Logger.getLogger(ScheduleServlet.class.getName());
-
-    // TODO: store registration time, store unregistered, have client ask for a time frame (registrations/unregistrations for the last x seconds)
-    private static final Key DATASTORE_SCHEDULES_KEY = KeyFactory.createKey("FlyWithMe", "Schedules");
-    private static final Map<Integer, TakeoffSchedule> schedules = new HashMap<>();
-    private static long lastScheduleClean = 0;
-
-    public ScheduleServlet() {
-        // read in schedule from datastore
-        DatastoreService datastore = DatastoreServiceFactory.getDatastoreService();
-        try {
-            Entity entity = datastore.get(DATASTORE_SCHEDULES_KEY);
-            for (Map.Entry<String, Object> entry : entity.getProperties().entrySet()) {
-                try {
-                    Text text = (Text) entry.getValue();
-                    ByteArrayInputStream inputStream = new ByteArrayInputStream(text.getValue().getBytes());
-                    XMLDecoder decoder = new XMLDecoder(inputStream);
-                    schedules.put(Integer.valueOf(entry.getKey()), (TakeoffSchedule) decoder.readObject());
-                } catch (Exception e) {
-                    // failed reading in schedule? log error, and continue trying to read in remaining
-                    log.log(Level.WARNING, "Failed reading in schedule for takeoff " + entry.getKey() + ": " + entry.getValue(), e);
-                }
-            }
-        } catch (EntityNotFoundException e) {
-            // seems like our datastore doesn't have any schedules
-            log.log(Level.INFO, "No data found in datastore");
-        }
-    }
-
-    @Override
-    protected void doPost(final HttpServletRequest request, final HttpServletResponse response) throws IOException {
-        try (DataInputStream inputStream = new DataInputStream(request.getInputStream()); DataOutputStream outputStream = new DataOutputStream(response.getOutputStream())) {
-            int operation = inputStream.readUnsignedByte();
-            int responseCode;
-            switch (operation) {
-                case 0:
-                    // fetch schedule for supplied takeoffs
-                    // input:
-                    // ushort: takeoffIdCount
-                    //   ushort: takeoffId
-                    responseCode = getScheduleV1(inputStream, outputStream);
-                    // output:
-                    // <loop>
-                    //   ushort: takeoffId (if this value is 0, then the end of the list is reached and no more data should be attempted read)
-                    //   ushort: timestamps
-                    //     int: timestamp
-                    //     ushort: pilots
-                    //       string: pilot name
-                    //       string: pilot phone
-                    break;
-
-                case 1:
-                    // register flight at takeoff
-                    // input:
-                    // ushort: takeoffId
-                    // int: timestamp
-                    // long: pilotId
-                    // string: name
-                    // string: phone
-                    responseCode = registerScheduleEntryV1(inputStream);
-                    // output:
-                    // <none>
-                    break;
-
-                case 2:
-                    // unregister flight at takeoff
-                    // input:
-                    // ushort: takeoffId
-                    // int: timestamp
-                    // long: pilotId
-                    responseCode = unregisterScheduleEntryV1(inputStream);
-                    // output:
-                    // <none>
-                    break;
-
-                case 3:
-                    // fetch meteogram/sounding for location
-                    // input:
-                    // float: latitude
-                    // float: longitude
-                    // boolean: fetchMeteogram
-                    // ubyte: soundings
-                    //   int: timestamp
-                    // short: userId [optional]
-                    // short: proc [optional]
-                    // string: captcha [optional]
-                    responseCode = NoaaProxy.getMeteogramAndSounding(inputStream, outputStream);
-                    // output:
-                    // ubyte: 0 [responsetype: captcha]
-                    // ushort: userId
-                    // ushort: proc
-                    // int: captchaSize
-                    // <bytes>: captchaImage
-                    //
-                    // OR
-                    //
-                    // ubyte: 1 [responsetype: meteogram/sounding]
-                    // ubyte: images
-                    //   int: imageSize
-                    //   <bytes>: image
-                    break;
-
-                /*
-                case 4:
-                    // input:
-                    // <none>
-                    responseCode = getScheduleV2(outputStream);
-                    // output:
-                    // <loop>
-                    //   ushort: takeoffId (if this value is 0, then the end of the list is reached and no more data should be attempted read)
-                    //   ushort: timestamps
-                    //     int: timestamp
-                    //     ushort: pilots
-                    //       string: pilot name
-                    //       string: pilot phone
-                    break;
-                 */
-
-                default:
-                    responseCode = HttpServletResponse.SC_NOT_FOUND;
-                    break;
-            }
-
-            if (responseCode != HttpServletResponse.SC_OK)
-                response.sendError(responseCode);
-
-            // clean up schedule if it's been some time since we last cleaned
-            long currentTime = System.currentTimeMillis();
-            if (currentTime < lastScheduleClean + 1000 * 60 * 60 * 6)
-                return; // less than 6 hours since last cleanup, no rush
-            int expireTime = (int) ((currentTime - 1000 * 60 * 60 * 24) / 1000); // remove all entries that are older than 24 hours
-            Iterator<Map.Entry<Integer, TakeoffSchedule>> scheduleIterator = schedules.entrySet().iterator();
-            while (scheduleIterator.hasNext()) {
-                Map.Entry<Integer, TakeoffSchedule> scheduleIteratorEntry = scheduleIterator.next();
-                TakeoffSchedule takeoffSchedule = scheduleIteratorEntry.getValue();
-                takeoffSchedule.removeExpired(expireTime);
-                if (takeoffSchedule.isEmpty())
-                    scheduleIterator.remove();
-            }
-            storeSchedules();
-
-            // clean up cached forecast images as well
-            NoaaProxy.cleanCache();
-
-            lastScheduleClean = currentTime;
-        } catch (Exception e) {
-            log.log(Level.WARNING, "Exception handling request", e);
-            response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
-        }
-    }
+/**
+ * Created by canidae on 6/24/14.
+ */
+public class ScheduleHandler {
+    private static final Logger log = Logger.getLogger(ScheduleHandler.class.getName());
 
     /* schedule for favourited takeoffs */
-    private static synchronized int getScheduleV1(final DataInputStream inputStream, final DataOutputStream outputStream) throws IOException {
+    public static synchronized int getScheduleV1(final DataInputStream inputStream, final DataOutputStream outputStream) throws IOException {
         int takeoffCount = inputStream.readUnsignedShort();
         if (takeoffCount > 200)
             takeoffCount = 200; // don't allow asking for more than 200 takeoffs

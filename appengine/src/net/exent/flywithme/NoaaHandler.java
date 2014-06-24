@@ -17,8 +17,8 @@ import java.util.regex.Pattern;
 /**
  * Created by canidae on 6/13/14.
  */
-public class NoaaProxy {
-    private static final Logger log = Logger.getLogger(NoaaProxy.class.getName());
+public class NoaaHandler {
+    private static final Logger log = Logger.getLogger(NoaaHandler.class.getName());
 
     private static final Key DATASTORE_METEOGRAMS_KEY = KeyFactory.createKey("FlyWithMe", "Meteograms");
     private static final Key DATASTORE_SOUNDINGS_KEY = KeyFactory.createKey("FlyWithMe", "Soundings");
